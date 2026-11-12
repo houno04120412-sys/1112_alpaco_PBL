@@ -1,0 +1,37 @@
+{
+  "company": "Northbeam Advisory",
+  "brand_mark": "N",
+  "tagline": "Growth strategy for mid-market brands",
+  "bpm": 120,
+  "button": { "label": "Book a strategy call" },
+  "island": { "label": "Northbeam · Live briefing" },
+  "player": {
+    "title": "Growth Briefing, Ep. 12",
+    "subtitle": "Northbeam Advisory · 24 min",
+    "duration_sec": 1440
+  },
+  "tabs": ["Revenue", "Margin", "Retention"],
+  "chart": {
+    "label": "Net revenue retention",
+    "value": "118%",
+    "delta": "+12 pts",
+    "series": [94, 97, 99, 103, 106, 110, 118, 121],
+    "x_labels": ["Q1", "Q2", "Q3", "Q4", "Q1", "Q2", "Q3", "Q4"],
+    "hover_index": 6,
+    "tooltip": "Q3 2025 · 118%"
+  },
+  "palette": {
+    "placeholder": "Search commands…",
+    "query": "prop",
+    "target": 1,
+    "items": [
+      { "label": "Open Q3 growth report", "icon": "doc", "hint": "⌘O" },
+      { "label": "Send proposal to Halden Foods", "icon": "send", "hint": "↵" },
+      { "label": "Share proposal draft", "icon": "share", "hint": "⌘S" },
+      { "label": "Schedule discovery call", "icon": "calendar", "hint": "⌘D" },
+      { "label": "Invite team member", "icon": "user", "hint": "⌘I" }
+    ]
+  },
+  "toast": { "title": "Proposal sent to Halden Foods", "action": "View" },
+  "audio": null
+}

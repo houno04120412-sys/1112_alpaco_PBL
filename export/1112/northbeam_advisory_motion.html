@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Northbeam Advisory — motion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=block" rel="stylesheet">
+<style>
+:root{--f:"Geist","Inter","Segoe UI",system-ui,sans-serif;--canvas:#E7E3DD}
+html,body{margin:0;height:100%;background:var(--canvas);overflow:hidden}
+body{display:flex;align-items:center;justify-content:center;font-family:var(--f);-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+#fit{width:1440px;height:1440px;flex:none;transform-origin:50% 50%}
+#stage{position:relative;width:1440px;height:1440px;background:var(--canvas);overflow:hidden}
+#cam{position:absolute;left:720px;top:720px;width:0;height:0}
+#shape{position:absolute;overflow:hidden;box-shadow:0 18px 40px -14px rgba(0,0,0,.22),0 2px 6px rgba(0,0,0,.05)}
+#c{position:absolute;width:0;height:0}
+.L{position:absolute;left:0;top:0;width:0;height:0}
+.a{position:absolute;white-space:nowrap}
+.ctr{position:absolute;left:0;top:0;transform:translate(-50%,-50%);white-space:nowrap}
+#cursor{position:absolute;left:0;top:0;width:44px;height:44px;transform-origin:6px 4px;overflow:visible}
+#hint{position:fixed;left:16px;bottom:12px;font:500 13px/1 var(--f);color:#8f8a83}
+body.render #hint{display:none}
+</style>
+</head>
+<body>
+<div id="fit"><div id="stage">
+  <div id="cam"><div id="shape"><div id="c"></div></div></div>
+  <svg id="cursor" viewBox="0 0 44 44"><path d="M6 4 L6 34 L14 26.5 L19.5 38.5 L24.5 36.5 L19 24.5 L30 24.5 Z" fill="#0b0b0b" stroke="#fff" stroke-width="2.2" stroke-linejoin="round"/></svg>
+</div></div>
+<div id="hint">Click: sound · Space: pause</div>
+<script>
+(function(){
+'use strict';
+const D={"company": "Northbeam Advisory", "brand_mark": "N", "tagline": "Growth strategy for mid-market brands", "bpm": 120, "button": {"label": "Book a strategy call"}, "island": {"label": "Northbeam · Live briefing"}, "player": {"title": "Growth Briefing, Ep. 12", "subtitle": "Northbeam Advisory · 24 min", "duration_sec": 1440}, "tabs": ["Revenue", "Margin", "Retention"], "chart": {"label": "Net revenue retention", "value": "118%", "delta": "+12 pts", "series": [94, 97, 99, 103, 106, 110, 118, 121], "x_labels": ["Q1", "Q2", "Q3", "Q4", "Q1", "Q2", "Q3", "Q4"], "hover_index": 6, "tooltip": "Q3 2025 · 118%"}, "palette": {"placeholder": "Search commands…", "query": "prop", "target": 1, "items": [{"label": "Open Q3 growth report", "icon": "doc", "hint": "⌘O"}, {"label": "Send proposal to Halden Foods", "icon": "send", "hint": "↵"}, {"label": "Share proposal draft", "icon": "share", "hint": "⌘S"}, {"label": "Schedule discovery call", "icon": "calendar", "hint": "⌘D"}, {"label": "Invite team member", "icon": "user", "hint": "⌘I"}]}, "toast": {"title": "Proposal sent to Halden Foods", "action": "View"}, "audio": null};
+const Q=new URLSearchParams(location.search);
+const RENDER=Q.has('render');
+if(RENDER) document.body.classList.add('render');
+
+// ---------- time & springs (everything is a pure function of t) ----------
+const BPM=D.bpm||120, B=60/BPM, NB=28, T=NB*B, bt=b=>b*B;
+const clamp=(x,a=0,b=1)=>x<a?a:x>b?b:x, lerp=(a,b,x)=>a+(b-a)*x;
+const eo=x=>1-Math.pow(1-x,3), ei=x=>x*x;
+// closed-form step response of a damped spring, 0 before the step
+function S(dt,w,z){
+  if(dt<=0) return 0;
+  if(z>=1) return 1-Math.exp(-w*dt)*(1+w*dt);
+  const wd=w*Math.sqrt(1-z*z);
+  return 1-Math.exp(-z*w*dt)*(Math.cos(wd*dt)+(z*w/wd)*Math.sin(wd*dt));
+}
+const SP={ui:[19,.84],fast:[34,.86],slow:[15,.9],cam:[9,.96],cur:[13,.94],drag:[7.5,1],draw:[6,1],press:[40,.9]};
+// Sum of one spring per target change. The previous loop's steps are added too,
+// so the value is periodic in T and continuous (with velocity) across the loop.
+function track(keys,def){
+  def=def||SP.ui;
+  keys=keys.slice().sort((a,b)=>a[0]-b[0]);
+  const last=keys[keys.length-1][1]; let prev=last; const st=[];
+  for(const k of keys){const d=k[1]-prev; prev=k[1]; if(d!==0) st.push([bt(k[0]),d,k[2]||def]);}
+  return t=>{let v=last; for(const s of st) v+=s[1]*(S(t-s[0],s[2][0],s[2][1])+S(t-s[0]+T,s[2][0],s[2][1])); return v;};
+}
+// content enter/exit window (beats); exit finishes before the next content enters
+function win(t,a,b){
+  let best=0;
+  for(const sh of [-T,0,T]){
+    const A=bt(a)+sh, E=bt(b)+sh;
+    if(t<A+.1||t>E+.1) continue;
+    best=Math.max(best,eo(clamp((t-A-.1)/.2))*(1-ei(clamp((t-E)/.1))));
+  }
+  return best;
+}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ---------- icons: one stroke weight (2px in world units at any size) ----------
+const IC={arrow:'<path d="M5 12h14M13 6l6 6-6 6"/>',check:'<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+doc:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+send:'<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/>',
+share:'<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>',
+calendar:'<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+user:'<circle cx="9" cy="7" r="4"/><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><path d="M19 8v6M22 11h-6"/>',
+chart:'<path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 6-6"/>',
+checkCircle:'<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.8 2.8L16.5 9.5"/>'};
+const icon=(n,s,col,st)=>`<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${col}" stroke-width="${(48/s).toFixed(3)}" stroke-linecap="round" stroke-linejoin="round" style="${st||''}">${IC[n]}</svg>`;
+
+// ---------- timeline (beats) ----------
+const Z={button:2.3,loader:5,island:2.2,player:1.75,slider:1.65,toggle:3.4,tabs:1.6,chart:1.5,cmdk:3.4,palette:1.55,toast:2.0};
+const PAL=D.palette, ITEMS=PAL.items, QL=PAL.query.toLowerCase(), NQ=QL.length;
+const CSTEP=Math.min(.25,.9/NQ), CHARB=Array.from({length:NQ},(_,k)=>24.5+k*CSTEP), ENTERB=25.75;
+const PH=n=>72+24+n*56;
+const itemInfo=ITEMS.map((_,i)=>({kill:null,keys:[[0,i]]}));
+const palH=[];
+{ let prevN=ITEMS.length;
+  for(let k=1;k<=NQ;k++){
+    let j=0;
+    ITEMS.forEach((it,i)=>{ if(it.label.toLowerCase().includes(QL.slice(0,k))){itemInfo[i].keys.push([CHARB[k-1],j]); j++;}
+      else if(itemInfo[i].kill===null) itemInfo[i].kill=CHARB[k-1]; });
+    if(j!==prevN){palH.push([CHARB[k-1],PH(j)]); prevN=j;}
+  }
+  itemInfo.forEach((f,i)=>{f.keys.push([26.5,i]); f.idx=track(f.keys);});
+}
+//        beat  W    H    R   lum  cam
+const SH=[[1,  96,  96,  48, 0,   Z.loader],
+          [4,  440, 80,  40, 0,   Z.island],
+          [5,  600, 232, 44, 0,   Z.player],
+          [11, 620, 112, 56, 1,   Z.slider],
+          [15, 224, 124, 62, .72, Z.toggle],
+          [17, 640, 104, 52, 0,   Z.tabs],
+          [20, 680, 540, 44, 0,   Z.chart],
+          [23, 168, 112, 30, 1,   Z.cmdk],
+          [24, 680, PH(ITEMS.length), 28, 1, Z.palette],
+          [26, 520, 96,  48, 0,   Z.toast],
+          [27, 380, 96,  48, 0,   Z.button]];
+const tW=track(SH.map(s=>[s[0],s[1]])), tH=track(SH.map(s=>[s[0],s[2]]).concat(palH)), tR=track(SH.map(s=>[s[0],s[3]]));
+const tLum=track(SH.map(s=>[s[0],s[4]]).concat([[16,0]])), tCam=track(SH.map(s=>[s[0],s[5]]),SP.cam);
+const camAt=b=>{let z=SH[SH.length-1][5]; for(const s of SH) if(s[0]<=b) z=s[5]; return z;};
+
+const tPress=track([[0,1],[1,.95,SP.press],[1.2,1],[16,.96,SP.press],[16.2,1],[18,.985,SP.press],[18.2,1],[19,.985,SP.press],[19.2,1],[23.55,.94,SP.press],[23.75,1],[25.75,.98,SP.press],[25.95,1]]);
+const tArrow=track([[0,4],[1,0]]);
+const tPlayM=track([[0,0],[6,1],[11.5,0]]);
+const tPlayPress=track([[0,1],[6,.86,SP.press],[6.2,1]]);
+const tK1=track([[0,1],[8,1.6],[10,1]]), tK2=track([[0,1],[12,1.35],[14,1]]);
+// toggle knob / tab indicator: leading edge rides the fast spring, trailing edge the slow one
+const TB=i=>-200+200*i;
+const tL=track([[0,-100],[16,0,SP.slow],[17,TB(0)-96,SP.fast],[18,TB(1)-96,SP.slow],[19,TB(2)-96,SP.slow],[25,-100]]);
+const tRr=track([[0,0],[16,100,SP.fast],[17,TB(0)+96,SP.slow],[18,TB(1)+96,SP.fast],[19,TB(2)+96,SP.fast],[25,0]]);
+const tHk=track([[0,100],[17,80],[25,100]]), tRow=track([[0,0],[20,-218],[24,0]]);
+const tDraw=track([[0,0],[20.5,1,SP.draw],[23.5,0,SP.fast]]);
+const tHov=track([[0,5],[22,8],[23,5]]);
+const tHiPress=track([[0,1],[ENTERB,.97,SP.press],[ENTERB+.2,1]]);
+
+// player progress + slider constants
+const P0=.18, RATE=.012, PX0=-260, PL=520, VX0=-210, VL=420, V0=.45;
+const pAt8=P0+RATE*(bt(8)-bt(6));
+// chart geometry
+const CH=D.chart, SER=CH.series, NP=SER.length, HI=CH.hover_index;
+const lo=Math.min(...SER), hi=Math.max(...SER), pad=(hi-lo)*.18||1;
+const CX=i=>20+i*560/(NP-1), CY=v=>12+(1-(v-(lo-pad))/((hi+pad)-(lo-pad)))*216;
+const PTS=SER.map((v,i)=>[CX(i),CY(v)]);
+const hx=-300+PTS[HI][0], hy=-56+PTS[HI][1];
+
+// cursor: [beat, 'w'orld|'s'creen, x, y, spring]
+const CK=[[27.1,'w',60,22],[1.5,'s',1000,1010],[5.2,'w',236,-40],[6.5,'s',1150,990],
+  [7.2,'w',PX0+PL*pAt8,56],[8.15,'w',PX0+PL*.72,56,SP.drag],[10.4,'s',1240,1060],
+  [11.2,'w',VX0+VL*V0,0],[12.1,'w',VX0+VL,0,SP.drag],[13,'w',VX0+VL+150,0,SP.drag],[14.35,'s',1200,1000],
+  [15.3,'w',28,6],[17.3,'w',6,8],[18.4,'w',TB(2)+6,8],[19.5,'s',1240,1180],
+  [21.3,'w',hx+3,hy+4],[22.6,'s',1250,1210],[26.4,'w',190,16]];
+const toS=k=>k[1]==='w'?[720+k[2]*camAt(k[0]),720+k[3]*camAt(k[0])]:[k[2],k[3]];
+const tCx=track(CK.map(k=>[k[0],toS(k)[0],k[4]||SP.cur])), tCy=track(CK.map(k=>[k[0],toS(k)[1],k[4]||SP.cur]));
+const tCs=track([[0,1],[1,.82,SP.press],[1.2,1],[6,.82,SP.press],[6.2,1],[8,.82,SP.press],[10,1],[12,.82,SP.press],[14,1],[16,.82,SP.press],[16.2,1],[18,.82,SP.press],[18.2,1],[19,.82,SP.press],[19.2,1]]);
+const worldX=t=>(tCx(t)-720)/Math.min(tCam(t),1260/tW(t),1260/(tH(t)));
+
+// drags: value comes from the cursor while held, springs from there on release
+function progress(t){
+  if(t<bt(6)) return P0;
+  if(t<bt(8)) return P0+RATE*(t-bt(6));
+  const hold=u=>clamp(pAt8+(worldX(u)-worldX(bt(8)))/PL);
+  if(t<bt(10)) return hold(t);
+  return hold(bt(10))+RATE*(t-bt(10));
+}
+function vol(t){
+  if(t<bt(12)) return {v:V0,s:0};
+  const raw=V0+(worldX(Math.min(t,bt(14)))-worldX(bt(12)))/VL;
+  const s0=70*(1-Math.exp(-Math.max(0,(raw-1)*VL)/110));
+  return {v:clamp(raw), s:t<bt(14)?s0:s0*(1-S(t-bt(14),SP.ui[0],SP.ui[1]))};
+}
+
+// sound events (seconds) — same list drives the browser synth and the render mix
+const EV=[];
+const ev=(b,type)=>EV.push({t:+bt(b).toFixed(4),beat:b,type});
+[1,6,16,18,19].forEach(b=>ev(b,'click')); [8,12].forEach(b=>ev(b,'grab')); [10,14].forEach(b=>ev(b,'release'));
+ev(3,'success'); ev(26,'success'); ev(16,'toggle'); ev(22,'hover'); ev(23.55,'key'); ev(ENTERB,'enter');
+SH.forEach(s=>ev(s[0],'morph')); CHARB.forEach(b=>ev(b,'key'));
+EV.sort((a,b)=>a.t-b.t);
+
+// ---------- DOM ----------
+const $=id=>document.getElementById(id);
+const mark=esc(D.brand_mark);
+const C=$('c');
+C.innerHTML=`
+<div class="L" id="Lbtn"><div class="ctr" style="display:flex;align-items:center;gap:12px;font:600 24px/1 var(--f);letter-spacing:-.01em;color:#fff"><span>${esc(D.button.label)}</span><span id="btnArrow" style="display:flex">${icon('arrow',22,'#fff')}</span></div></div>
+<div class="L" id="Lload"><svg class="ctr" width="48" height="48" viewBox="0 0 48 48" style="overflow:visible"><circle id="ldArc" cx="24" cy="24" r="17" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/></svg></div>
+<div class="L" id="Lchk"><svg class="ctr" width="48" height="48" viewBox="0 0 48 48"><path id="chkP" d="M13 24.5l7.5 7.5L35 17" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+<div class="L" id="Lisl">
+  <div class="a" style="left:-196px;top:-16px;width:32px;height:32px;border-radius:16px;background:#fff;color:#0b0b0b;font:700 15px/32px var(--f);text-align:center">${mark}</div>
+  <div class="a" style="left:-150px;top:-11px;font:500 18px/22px var(--f);color:#fff">${esc(D.island.label)}</div>
+  ${[0,1,2,3,4].map(i=>`<div class="a isb" style="left:${134+i*9}px;width:4px;border-radius:2px;background:#fff"></div>`).join('')}
+</div>
+<div class="L" id="Lply">
+  <div class="a" style="left:-268px;top:-88px;width:96px;height:96px;border-radius:22px;background:#fff;color:#0b0b0b;font:700 44px/96px var(--f);text-align:center;letter-spacing:-.02em">${mark}</div>
+  <div class="a" style="left:-148px;top:-76px;font:600 24px/30px var(--f);color:#fff;letter-spacing:-.01em">${esc(D.player.title)}</div>
+  <div class="a" style="left:-148px;top:-40px;font:400 16px/20px var(--f);color:rgba(255,255,255,.55)">${esc(D.player.subtitle)}</div>
+  <div class="a" id="playBtn" style="left:204px;top:-72px;width:64px;height:64px;border-radius:32px;background:#fff"><svg width="64" height="64" viewBox="-16 -16 32 32"><path id="playP" fill="#0b0b0b"/></svg></div>
+  <div class="a" style="left:${PX0}px;top:53px;width:${PL}px;height:6px;border-radius:3px;background:rgba(255,255,255,.18)"></div>
+  <div class="a" id="pFill" style="left:${PX0}px;top:53px;height:6px;border-radius:3px;background:#fff"></div>
+  <div class="a" id="pKnob" style="width:16px;height:16px;border-radius:8px;background:#fff"></div>
+  <div class="a" id="pCur" style="left:${PX0}px;top:74px;font:500 14px/16px var(--f);color:rgba(255,255,255,.55)"></div>
+  <div class="a" style="right:${PX0}px;top:74px;font:500 14px/16px var(--f);color:rgba(255,255,255,.55)">${fmt(D.player.duration_sec)}</div>
+</div>
+<div class="L" id="Lsld">
+  <svg class="a" style="left:-279px;top:-14px" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0b0b0b" stroke-width="1.714" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path id="w1" d="M15.5 8.5a5 5 0 0 1 0 7"/><path id="w2" d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+  <div class="a" id="vTrack" style="left:${VX0}px;top:-3px;height:6px;border-radius:3px;background:rgba(0,0,0,.1)"></div>
+  <div class="a" id="vFill" style="left:${VX0}px;top:-3px;height:6px;border-radius:3px;background:#0b0b0b"></div>
+  <div class="a" id="vKnob" style="width:26px;height:26px;border-radius:13px;background:#0b0b0b"></div>
+  <div class="a" id="vNum" style="width:44px;text-align:right;top:-10px;font:600 18px/20px var(--f);color:#0b0b0b"></div>
+</div>
+<div class="a" id="knob" style="background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.18)"></div>
+<div class="L" id="Ltab">${D.tabs.map(s=>`<div class="a tl" style="left:0;top:0;font:600 20px/1 var(--f);letter-spacing:-.01em">${esc(s)}</div>`).join('')}</div>
+<div class="L" id="Lcht">
+  <div class="a" style="left:-300px;top:-160px;font:500 16px/20px var(--f);color:rgba(255,255,255,.55)">${esc(CH.label)}</div>
+  <div class="a" style="left:-300px;top:-134px;display:flex;align-items:center;gap:14px"><span style="font:600 48px/52px var(--f);color:#fff;letter-spacing:-.02em">${esc(CH.value)}</span><span style="font:500 15px/1 var(--f);color:#fff;border:1.5px solid rgba(255,255,255,.3);border-radius:14px;padding:6px 10px">${esc(CH.delta)}</span></div>
+  <svg class="a" style="left:-300px;top:-56px;overflow:visible" width="600" height="240">
+    ${[12,84,156,228].map(y=>`<line x1="0" x2="600" y1="${y}" y2="${y}" stroke="rgba(255,255,255,.1)" stroke-width="1"/>`).join('')}
+    <line id="chG" x1="${PTS[HI][0]}" x2="${PTS[HI][0]}" y1="${PTS[HI][1]}" y2="228" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
+    <path id="chP" d="${smooth(PTS)}" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    ${PTS.map(p=>`<circle class="chd" cx="${p[0]}" cy="${p[1]}" r="4" fill="#0b0b0b" stroke="#fff" stroke-width="2.5"/>`).join('')}
+  </svg>
+  ${D.chart.x_labels.map((s,i)=>`<div class="a" style="left:${-300+CX(i)}px;top:194px;transform:translateX(-50%);font:500 13px/16px var(--f);color:rgba(255,255,255,.45)">${esc(s)}</div>`).join('')}
+  <div class="a" id="tip" style="left:${hx}px;top:${hy-18}px;transform-origin:50% 100%;background:#fff;color:#0b0b0b;border-radius:12px;padding:9px 12px;font:600 15px/18px var(--f)">${esc(CH.tooltip)}</div>
+</div>
+<div class="L" id="Lcmd"><div class="ctr" style="font:600 46px/1 var(--f);color:#0b0b0b;letter-spacing:-.02em">⌘K</div></div>
+<div class="L" id="Lpal">
+  <div class="a" id="palIn" style="left:0;top:0">
+    ${icon('search',22,'rgba(0,0,0,.45)','position:absolute;left:-316px;top:25px')}
+    <div class="a" style="left:-280px;top:23px;font:500 22px/26px var(--f);color:#0b0b0b;display:flex;align-items:center"><span id="palTxt"></span><span id="palCar" style="width:2px;height:26px;background:#0b0b0b;margin:0 2px;display:inline-block"></span><span id="palPh" style="color:rgba(0,0,0,.38)">${esc(PAL.placeholder)}</span></div>
+    <div class="a" style="left:-340px;top:71px;width:680px;height:1px;background:rgba(0,0,0,.08)"></div>
+  </div>
+  <div class="a" id="palHi" style="left:-328px;top:0;width:656px;height:52px;border-radius:14px;background:#0b0b0b"></div>
+  ${ITEMS.map(it=>`<div class="a pit" style="left:0;top:0">${icon(it.icon,20,'currentColor','position:absolute;left:-310px;top:-10px')}<span class="a" style="left:-276px;top:-11px;font:500 18px/22px var(--f)">${esc(it.label)}</span><span class="a pih" style="right:-312px;top:-9px;font:500 14px/18px var(--f)">${esc(it.hint)}</span></div>`).join('')}
+</div>
+<div class="L" id="Ltst">
+  ${icon('checkCircle',28,'#fff','position:absolute;left:-232px;top:-14px')}
+  <div class="a" style="left:-192px;top:-12px;font:500 20px/24px var(--f);color:#fff">${esc(D.toast.title)}</div>
+  <div class="a" style="right:-228px;top:-10px;font:500 16px/20px var(--f);color:rgba(255,255,255,.55)">${esc(D.toast.action)}</div>
+</div>`;
+function fmt(s){s=Math.max(0,Math.floor(s)); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+function smooth(p){
+  let d=`M${p[0][0].toFixed(1)},${p[0][1].toFixed(1)}`;
+  for(let i=0;i<p.length-1;i++){
+    const a=p[i-1]||p[i], b=p[i], c=p[i+1], e=p[i+2]||c;
+    d+=` C${(b[0]+(c[0]-a[0])/6).toFixed(1)},${(b[1]+(c[1]-a[1])/6).toFixed(1)} ${(c[0]-(e[0]-b[0])/6).toFixed(1)},${(c[1]-(e[1]-b[1])/6).toFixed(1)} ${c[0].toFixed(1)},${c[1].toFixed(1)}`;
+  }
+  return d;
+}
+const camEl=$('cam'), shape=$('shape'), cur=$('cursor');
+const E={}; ['Lbtn','btnArrow','Lload','ldArc','Lchk','chkP','Lisl','Lply','playBtn','playP','pFill','pKnob','pCur','Lsld','vTrack','vFill','vKnob','vNum','w1','w2','knob','Ltab','Lcht','chP','chG','tip','Lcmd','Lpal','palIn','palTxt','palCar','palPh','palHi','Ltst'].forEach(k=>E[k]=$(k));
+const isb=[...C.querySelectorAll('.isb')], tls=[...C.querySelectorAll('.tl')], dots=[...C.querySelectorAll('.chd')], pits=[...C.querySelectorAll('.pit')], pihs=[...C.querySelectorAll('.pih')];
+const hov=dots[HI];
+const LD=2*Math.PI*17, CL=E.chkP.getTotalLength(), PLEN=E.chP.getTotalLength();
+E.chP.style.strokeDasharray=PLEN;
+E.chkP.style.strokeDasharray=CL;
+const tlW=tls.map(el=>el.offsetWidth);
+
+const PLAY=[[-7,-12],[2,-6],[2,6],[-7,12],[2,-6],[11,0],[11,0],[2,6]].map(p=>[p[0]-1.5,p[1]]);
+const PAUSE=[[-8,-11],[-2,-11],[-2,11],[-8,11],[2,-11],[8,-11],[8,11],[2,11]];
+
+function setL(el,v,extra){
+  el.style.visibility=v<=.001?'hidden':'visible';
+  if(v<=.001) return false;
+  el.style.opacity=v;
+  el.style.filter=v>.995?'none':`blur(${((1-v)*9).toFixed(2)}px)`;
+  el.style.transform=`scale(${.94+.06*v})`+(extra||'');
+  return true;
+}
+const mixC=(f,a,b)=>`rgb(${Math.round(lerp(a,b,f))},${Math.round(lerp(a,b,f))},${Math.round(lerp(a,b,f))})`;
+
+function seek(tt){
+  const t=((tt%T)+T)%T;
+  const vs=vol(t), st=vs.s;
+  const W=tW(t)+st, H=tH(t)-st*.14, ox=st/2, press=tPress(t);
+  // the camera spring is softer than the shape's, so cap it to keep the shape inside the frame
+  const cam=Math.min(tCam(t),1260/tW(t),1260/H);
+  const r=Math.min(tR(t),W/2,H/2), g=Math.round(lerp(11,255,clamp(tLum(t))));
+  camEl.style.transform=`scale(${cam})`;
+  const s=shape.style;
+  s.left=(ox-W/2)+'px'; s.top=(-H/2)+'px'; s.width=W+'px'; s.height=H+'px'; s.borderRadius=r+'px';
+  s.background=`rgb(${g},${g},${g})`; s.transformOrigin=`${W/2-ox}px ${H/2}px`; s.transform=`scale(${press})`;
+  C.style.left=(W/2-ox)+'px'; C.style.top=(H/2)+'px';
+
+  if(setL(E.Lbtn,win(t,27,29))) E.btnArrow.style.transform=`translateX(${tArrow(t)}px)`;
+  if(setL(E.Lload,win(t,1,3))){
+    const a=Math.max(0,t-bt(1)), f=.2+.45*(.5-.5*Math.cos(Math.PI*a/B));
+    E.ldArc.setAttribute('stroke-dasharray',`${(f*LD).toFixed(2)} ${LD.toFixed(2)}`);
+    E.ldArc.setAttribute('transform',`rotate(${(a*560-90).toFixed(2)} 24 24)`);
+  }
+  if(setL(E.Lchk,win(t,3,4))) E.chkP.style.strokeDashoffset=CL*(1-clamp(S(t-bt(3)-.05,18,1)));
+  if(setL(E.Lisl,win(t,4,5))) isb.forEach((el,i)=>{const h=6+16*Math.abs(Math.sin(t*7.3+i*1.3)); el.style.height=h+'px'; el.style.top=(-h/2)+'px';});
+  if(setL(E.Lply,win(t,5,11))){
+    const m=tPlayM(t);
+    const P=PLAY.map((p,i)=>[lerp(p[0],PAUSE[i][0],m),lerp(p[1],PAUSE[i][1],m)]);
+    const poly=a=>'M'+a.map(p=>p[0].toFixed(2)+','+p[1].toFixed(2)).join('L')+'Z';
+    E.playP.setAttribute('d',poly(P.slice(0,4))+poly(P.slice(4)));
+    E.playBtn.style.transform=`scale(${tPlayPress(t)})`;
+    const p=progress(t);
+    E.pFill.style.width=(p*PL)+'px';
+    E.pKnob.style.transform=`translate(${PX0+p*PL-8}px,48px) scale(${tK1(t)})`;
+    E.pCur.textContent=fmt(p*D.player.duration_sec);
+  }
+  if(setL(E.Lsld,win(t,11,15))){
+    const v=vs.v;
+    E.vTrack.style.width=(VL+st)+'px'; E.vFill.style.width=(v*VL+st)+'px';
+    E.vKnob.style.transform=`translate(${VX0+v*VL+st-13}px,-13px) scale(${tK2(t)})`;
+    E.vNum.style.left=(242+st)+'px'; E.vNum.textContent=Math.round(v*100);
+    E.w1.style.opacity=clamp(v*2.5); E.w2.style.opacity=clamp((v-.45)*2.5);
+  }
+  const vk=win(t,15,23), L=tL(t), R=tRr(t), hk=tHk(t), ry=tRow(t);
+  E.knob.style.visibility=vk<=.001?'hidden':'visible';
+  if(vk>.001){const k=E.knob.style; k.opacity=vk; k.left=L+'px'; k.top=(ry-hk/2)+'px'; k.width=Math.max(hk*.2,R-L)+'px'; k.height=hk+'px'; k.borderRadius=(hk/2)+'px';}
+  if(setL(E.Ltab,win(t,17,23))){
+    tls.forEach((el,i)=>{
+      const cx=TB(i), f=clamp((Math.min(R,cx+96)-Math.max(L,cx-96))/192);
+      el.style.transform=`translate(${cx-tlW[i]/2}px,${ry-10}px)`;
+      el.style.color=`rgba(${Math.round(lerp(255,11,f))},${Math.round(lerp(255,11,f))},${Math.round(lerp(255,11,f))},${lerp(.6,1,f)})`;
+    });
+  }
+  if(setL(E.Lcht,win(t,20,23))){
+    const d=clamp(tDraw(t));
+    E.chP.style.strokeDashoffset=PLEN*(1-d);
+    dots.forEach((el,i)=>el.style.opacity=clamp((d-PTS[i][0]/600)*12+1));
+    hov.setAttribute('r',tHov(t).toFixed(2));
+    const vh=win(t,22,23);
+    E.chG.style.opacity=vh;
+    E.tip.style.opacity=vh; E.tip.style.transform=`translate(-50%,-100%) scale(${.9+.1*vh})`;
+  }
+  setL(E.Lcmd,win(t,23,24));
+  if(setL(E.Lpal,win(t,24,26))){
+    const top=-H/2;
+    let n=0; for(const b of CHARB) if(t>=bt(b)) n++;
+    E.palIn.style.transform=`translateY(${top}px)`;
+    E.palTxt.textContent=PAL.query.slice(0,n);
+    E.palPh.style.display=n?'none':'inline';
+    const typing=t>=bt(24.4)&&t<bt(ENTERB);
+    E.palCar.style.opacity=(typing||Math.floor(t/(B/2))%2===0)?1:0;
+    E.palHi.style.transform=`translateY(${top+86}px) scale(${tHiPress(t)})`;
+    pits.forEach((el,i)=>{
+      const f=itemInfo[i], idx=f.idx(t), alive=f.kill===null?1:1-ei(clamp((t-bt(f.kill))/.12));
+      const hl=clamp(1-Math.abs(idx));
+      el.style.transform=`translateY(${top+112+idx*56}px)`;
+      el.style.opacity=alive; el.style.filter=alive>.995?'none':`blur(${((1-alive)*8).toFixed(2)}px)`;
+      el.style.color=mixC(hl,11,255);
+      pihs[i].style.color=hl>.5?'rgba(255,255,255,.55)':'rgba(0,0,0,.38)';
+    });
+  }
+  setL(E.Ltst,win(t,26,27));
+  cur.style.transform=`translate(${tCx(t)-6}px,${tCy(t)-4}px) scale(${tCs(t)})`;
+}
+
+window.MOTION={seek,info:()=>({T,B,bpm:BPM,beats:NB,events:EV,company:D.company})};
+
+// ---------- live demo driver (render mode never runs this) ----------
+if(RENDER){ seek(+(Q.get('t')||0)); return; }
+const fit=()=>{$('fit').style.transform=`scale(${Math.min(innerWidth,innerHeight)/1440})`;};
+fit(); addEventListener('resize',fit);
+let base=performance.now(), paused=false, pausedAt=0, ctx=null, song=null, sched=0;
+const nowSec=()=>paused?pausedAt:(song?song.currentTime-(D.audio.first_downbeat||0):(performance.now()-base)/1000);
+const frame=()=>{seek(nowSec()); requestAnimationFrame(frame);};
+if(Q.has('t')){paused=true; pausedAt=+Q.get('t');}
+requestAnimationFrame(frame);
+addEventListener('keydown',e=>{ if(e.code!=='Space') return; e.preventDefault();
+  if(paused){paused=false; base=performance.now()-pausedAt*1000; if(song) song.play();} else {pausedAt=nowSec(); paused=true; if(song) song.pause();} });
+addEventListener('pointerdown',()=>{ if(ctx) return;
+  ctx=new AudioContext(); $('hint').style.display='none';
+  if(D.audio&&D.audio.src){ song=new Audio(D.audio.src); song.currentTime=D.audio.first_downbeat||0; song.play(); }
+  else base=performance.now();
+  paused=false; sched=nowSec(); setInterval(schedule,100);
+});
+function noise(d){const b=ctx.createBuffer(1,Math.ceil(ctx.sampleRate*d),ctx.sampleRate),a=b.getChannelData(0);for(let i=0;i<a.length;i++)a[i]=Math.random()*2-1;const s=ctx.createBufferSource();s.buffer=b;return s;}
+function tone(at,f0,f1,dur,amp,type){const o=ctx.createOscillator(),g=ctx.createGain();o.type=type||'sine';o.frequency.setValueAtTime(f0,at);o.frequency.exponentialRampToValueAtTime(f1,at+dur);g.gain.setValueAtTime(amp,at);g.gain.exponentialRampToValueAtTime(.0001,at+dur);o.connect(g).connect(ctx.destination);o.start(at);o.stop(at+dur+.02);}
+function hiss(at,dur,amp,freq,q){const n=noise(dur),f=ctx.createBiquadFilter(),g=ctx.createGain();f.type=q?'bandpass':'highpass';f.frequency.value=freq;if(q)f.Q.value=q;g.gain.setValueAtTime(amp,at);g.gain.exponentialRampToValueAtTime(.0001,at+dur);n.connect(f).connect(g).connect(ctx.destination);n.start(at);}
+const SFX={kick:a=>tone(a,150,42,.28,.9),hat:a=>hiss(a,.05,.12,7000),clap:a=>hiss(a,.14,.3,1500,1.2),
+  click:a=>{hiss(a,.03,.25,3000);tone(a,1800,1500,.04,.12);},grab:a=>tone(a,900,700,.06,.14),release:a=>tone(a,700,900,.06,.12),
+  key:a=>tone(a,2400,2200,.025,.1),enter:a=>tone(a,660,640,.12,.18),toggle:a=>{hiss(a,.025,.2,3500);tone(a,1200,1000,.05,.12);},
+  success:a=>{tone(a,880,880,.22,.12);tone(a+.08,1320,1320,.3,.1);},morph:a=>tone(a,320,560,.09,.07),hover:a=>tone(a,1600,1600,.03,.06)};
+const DRUMS=[];
+if(!(D.audio&&D.audio.src)) for(let k=0;k<NB;k++){DRUMS.push({t:bt(k),type:'kick'},{t:bt(k+.5),type:'hat'}); if(k%2===1) DRUMS.push({t:bt(k),type:'clap'});}
+function schedule(){
+  if(paused) return;
+  const c=nowSec(), now=ctx.currentTime, hz=c+.35;
+  if(sched<c) sched=c;
+  for(let Lp=Math.floor(sched/T);Lp<=Math.floor(hz/T);Lp++) for(const e of EV.concat(DRUMS)){
+    const ta=Lp*T+e.t; if(ta>=sched&&ta<hz) SFX[e.type](now+(ta-c));
+  }
+  sched=hz;
+}
+})();
+</script>
+</body>
+</html>
